@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tableau interactif</title>
+<style>
+  :root {
+    --bg: #f3f4f6; --panel: #ffffff; --text: #1f2937; --muted: #6b7280;
+    --line: #d1d5db; --ok: #15803d; --ko: #b91c1c; --warn: #b45309;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111827; --panel: #1f2937; --text: #f3f4f6; --muted: #9ca3af;
+      --line: #374151; --ok: #4ade80; --ko: #f87171; --warn: #fbbf24;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+  }
+  header, main { width: 100%; max-width: 1120px; }
+  header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 1.1rem; margin: 0; font-weight: 600; }
+  .status { font-size: 0.85rem; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ko); }
+  .dot.on { background: var(--ok); }
+  .toolbar { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; font-size: 0.9rem; }
+  .toolbar label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+  #pos { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--muted); }
+  main { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .boardwrap { flex: 1 1 560px; min-width: 0; }
+  canvas {
+    display: block; width: 100%; aspect-ratio: 4 / 3; background: #ffffff;
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  .hint { font-size: 0.8rem; color: var(--muted); margin-top: 6px; }
+  aside {
+    flex: 1 1 260px; max-width: 100%; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 6px; padding: 12px; max-height: 640px; overflow-y: auto;
+  }
+  aside h2 { font-size: 0.95rem; margin: 0 0 8px; font-weight: 600; }
+  ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  li { display: flex; gap: 8px; align-items: flex-start; padding: 6px; border-radius: 4px; font-size: 0.85rem; line-height: 1.35; }
+  li:hover { background: var(--bg); }
+  .sw { width: 12px; height: 12px; border-radius: 3px; flex: none; margin-top: 3px; border: 1px solid var(--line); }
+  .warn { color: var(--warn); }
+  .empty { color: var(--muted); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Tableau interactif</h1>
+    <div class="status"><span id="dot" class="dot"></span><span id="state">Connexion en cours</span></div>
+  </header>
+
+  <main>
+    <div class="boardwrap">
+      <div class="toolbar">
+        <label><input type="checkbox" id="grid" checked> Grille</label>
+        <label><input type="checkbox" id="labels" checked> Coordonnées des formes</label>
+        <span id="pos">Survolez le tableau</span>
+      </div>
+      <canvas id="board" width="800" height="600"></canvas>
+      <div class="hint">Tableau de 800 par 600. L'origine (0, 0) est en haut à gauche ; x augmente vers la droite, y vers le bas.</div>
+    </div>
+    <aside>
+      <h2>Formes reçues (<span id="count">0</span>)</h2>
+      <ul id="list"></ul>
+      <div id="empty" class="empty">Aucune forme. Lancez client.py pour en envoyer.</div>
+    </aside>
+  </main>
+
+<script>
+const W = 800, H = 600;
+const canvas = document.getElementById("board");
+const ctx = canvas.getContext("2d");
+const listEl = document.getElementById("list");
+const emptyEl = document.getElementById("empty");
+const countEl = document.getElementById("count");
+const posEl = document.getElementById("pos");
+const gridBox = document.getElementById("grid");
+const labelsBox = document.getElementById("labels");
+
+let shapes = [];
+let highlighted = -1;
+
+const rgb = (c) => `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+
+function bbox(s) {
+  switch (s.shape) {
+    case "point": return [s.x - 5, s.y - 5, s.x + 5, s.y + 5];
+    case "line": return [Math.min(s.x1, s.x2), Math.min(s.y1, s.y2), Math.max(s.x1, s.x2), Math.max(s.y1, s.y2)];
+    case "circle": { const r = Math.abs(s.radius); return [s.x - r, s.y - r, s.x + r, s.y + r]; }
+    case "rectangle": return [Math.min(s.x, s.x + s.width), Math.min(s.y, s.y + s.height), Math.max(s.x, s.x + s.width), Math.max(s.y, s.y + s.height)];
+    case "square": return [Math.min(s.x, s.x + s.cote), Math.min(s.y, s.y + s.cote), Math.max(s.x, s.x + s.cote), Math.max(s.y, s.y + s.cote)];
+  }
+}
+
+function describe(s) {
+  switch (s.shape) {
+    case "point": return `Point en (${s.x}, ${s.y})`;
+    case "line": return `Ligne de (${s.x1}, ${s.y1}) à (${s.x2}, ${s.y2})`;
+    case "circle": return `Cercle de centre (${s.x}, ${s.y}), rayon ${s.radius}`;
+    case "rectangle": return `Rectangle, coin haut gauche (${s.x}, ${s.y}), largeur ${s.width}, hauteur ${s.height}`;
+    case "square": return `Carré, coin haut gauche (${s.x}, ${s.y}), côté ${s.cote}`;
+  }
+}
+
+function anchors(s) {
+  if (s.shape === "line") return [[s.x1, s.y1], [s.x2, s.y2]];
+  return [[s.x, s.y]];
+}
+
+function drawGrid() {
+  ctx.lineWidth = 1;
+  ctx.font = "11px system-ui, sans-serif";
+  for (let v = 0; v <= W; v += 50) {
+    ctx.strokeStyle = v % 100 === 0 ? "#d1d5db" : "#eceef1";
+    ctx.beginPath(); ctx.moveTo(v + 0.5, 0); ctx.lineTo(v + 0.5, H); ctx.stroke();
+  }
+  for (let v = 0; v <= H; v += 50) {
+    ctx.strokeStyle = v % 100 === 0 ? "#d1d5db" : "#eceef1";
+    ctx.beginPath(); ctx.moveTo(0, v + 0.5); ctx.lineTo(W, v + 0.5); ctx.stroke();
+  }
+  ctx.fillStyle = "#6b7280";
+  for (let v = 100; v < W; v += 100) ctx.fillText(v, v + 3, 12);
+  for (let v = 100; v < H; v += 100) ctx.fillText(v, 3, v - 3);
+  ctx.fillText("0", 3, 12);
+}
+
+function drawShape(s) {
+  ctx.fillStyle = ctx.strokeStyle = rgb(s.color);
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  switch (s.shape) {
+    case "point": ctx.arc(s.x, s.y, 3, 0, 2 * Math.PI); ctx.fill(); break;
+    case "line": ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); ctx.stroke(); break;
+    case "circle": ctx.arc(s.x, s.y, Math.abs(s.radius), 0, 2 * Math.PI); ctx.fill(); break;
+    case "rectangle": ctx.fillRect(s.x, s.y, s.width, s.height); break;
+    case "square": ctx.fillRect(s.x, s.y, s.cote, s.cote); break;
+  }
+}
+
+function drawLabel(s) {
+  ctx.font = "12px system-ui, sans-serif";
+  ctx.lineJoin = "round";
+  for (const [x, y] of anchors(s)) {
+    ctx.fillStyle = "#111827";
+    ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI); ctx.fill();
+    const text = `(${x}, ${y})`;
+    const tx = Math.min(Math.max(x + 6, 2), W - 70);
+    const ty = Math.min(Math.max(y - 6, 14), H - 4);
+    ctx.lineWidth = 3; ctx.strokeStyle = "#ffffff"; ctx.strokeText(text, tx, ty);
+    ctx.fillStyle = "#111827"; ctx.fillText(text, tx, ty);
+  }
+}
+
+function drawHighlight() {
+  const s = shapes[highlighted];
+  if (!s) return;
+  const [x1, y1, x2, y2] = bbox(s);
+  ctx.save();
+  ctx.strokeStyle = "#dc2626"; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+  ctx.strokeRect(x1 - 4, y1 - 4, x2 - x1 + 8, y2 - y1 + 8);
+  ctx.restore();
+}
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  if (gridBox.checked) drawGrid();
+  shapes.forEach(drawShape);
+  if (labelsBox.checked) shapes.forEach(drawLabel);
+  drawHighlight();
+}
+
+function refreshList() {
+  listEl.innerHTML = "";
+  countEl.textContent = shapes.length;
+  emptyEl.style.display = shapes.length ? "none" : "block";
+  for (let i = shapes.length - 1; i >= 0; i--) {
+    const s = shapes[i];
+    const [x1, y1, x2, y2] = bbox(s);
+    const outside = x2 < 0 || x1 > W || y2 < 0 || y1 > H;
+    const li = document.createElement("li");
+    const sw = document.createElement("span");
+    sw.className = "sw"; sw.style.background = rgb(s.color);
+    const txt = document.createElement("span");
+    txt.textContent = `${i + 1}. ${describe(s)}`;
+    li.append(sw, txt);
+    if (outside) {
+      const w = document.createElement("div");
+      w.className = "warn"; w.textContent = "Hors de la zone visible";
+      txt.append(w);
+    }
+    li.addEventListener("mouseenter", () => { highlighted = i; render(); });
+    li.addEventListener("mouseleave", () => { highlighted = -1; render(); });
+    listEl.append(li);
+  }
+}
+
+function setShapes(list) { shapes = list; refreshList(); render(); }
+function addShape(s) { shapes.push(s); refreshList(); render(); }
+
+canvas.addEventListener("mousemove", (e) => {
+  const r = canvas.getBoundingClientRect();
+  const mouse = { x: Math.round((e.clientX - r.left) * W / r.width), y: Math.round((e.clientY - r.top) * H / r.height) };
+  posEl.textContent = `x = ${mouse.x}, y = ${mouse.y}`;
+});
+canvas.addEventListener("mouseleave", () => { posEl.textContent = "Survolez le tableau"; });
+gridBox.addEventListener("change", render);
+labelsBox.addEventListener("change", render);
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const dot = document.getElementById("dot"), state = document.getElementById("state");
+  ws.onopen = () => { dot.classList.add("on"); state.textContent = "Connecté"; };
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.type === "init") setShapes(msg.shapes);
+    else if (msg.type === "shape") addShape(msg.shape);
+    else if (msg.type === "clear") setShapes([]);
+  };
+  ws.onclose = () => {
+    dot.classList.remove("on");
+    state.textContent = "Déconnecté, nouvelle tentative";
+    setTimeout(connect, 2000);
+  };
+}
+
+render();
+connect();
+</script>
+</body>
+</html>
